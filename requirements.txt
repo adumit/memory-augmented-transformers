@@ -1,0 +1,4 @@
+torch
+transformers
+mlflow
+memorizing_transformers_pytorch
