@@ -13,6 +13,7 @@ from torch.optim import AdamW
 from .memory_augmented_transformers.gpt2.augmented_model import GPT2WithMemory
 from .memory_augmented_transformers.gpt2.lm_with_memory import GPT2LMHeadModelWithMemory
 from .memory_augmented_transformers.gpt2.chunked_dataset import GPT2Dataset 
+from .memory_augmented_transformers.train_and_validate import run_epoch, run_validation
 
 
 device = "cuda"
@@ -23,89 +24,35 @@ def format_time(elapsed):
     return str(datetime.timedelta(seconds=int(round((elapsed)))))
 
 
-def run_epoch(model, optimizer, knn_memories, train_dataloader, epoch_ind):
+def run_experiment(
+    run_name,
+    epochs=2,
+    lr=5e-4,
+    warmup_steps=1e2,
+    epsilon=1e-8,
+    batch_size=2,
+    num_memories=3
+):
 
-    total_train_loss = 0.
+    mlflow.end_run()
+    mlflow.end_run()
 
-    for step, batch in tqdm(enumerate(train_dataloader), total=len(train_dataloader)):
-
-        b_input_ids = batch[0].to(device)
-        b_labels = batch[0].to(device)
-        b_masks = batch[1].to(device)
-
-        model.zero_grad()        
-
-        outputs = model(
-            b_input_ids,
-            labels=b_labels, 
-            attention_mask = b_masks,
-            token_type_ids=None,
-            knn_memories=knn_memories
-        )
-
-        loss = outputs[0] 
-
-        batch_loss = loss.item()
-        total_train_loss += batch_loss
-        mlflow.log_metric("Train loss", loss.detach().cpu().data, step=step)
-
-        loss.backward()
-
-        optimizer.step()
-
-    # Calculate the average loss over all of the batches.
-    avg_train_loss = total_train_loss / len(train_dataloader)
-    mlflow.log_metric("Avg epoch loss", avg_train_loss, step=step+(epoch_ind * len(train_dataloader)))
-
-
-def run_validation(model, valid_dataloader, knn_memories, epoch=-1):
-    print("Running Validation...")
-
-    model.eval()
-
-    total_eval_loss = 0
-
-    # Evaluate data for one epoch
-    for batch in valid_dataloader:
-
-        b_input_ids = batch[0].to(device)
-        b_labels = batch[0].to(device)
-        b_masks = batch[1].to(device)
-
-        with torch.no_grad():        
-
-            outputs  = model(
-                b_input_ids, 
-#                            token_type_ids=None, 
-                attention_mask = b_masks,
-                labels=b_labels,
-                knn_memories=knn_memories)
-
-            loss = outputs[0]  
-
-        batch_loss = loss.item()
-        total_eval_loss += batch_loss        
-
-    avg_val_loss = total_eval_loss / len(valid_dataloader)
-
-    mlflow.log_metric("Validation loss", avg_val_loss, step=epoch+1)
-
-    return
-
-
-if __name__ == "__main__":
     rand_state = 1
     torch.manual_seed(rand_state)
 
     mlflow.set_registry_uri("./mlruns")
-    mlflow.set_experiment("Memory-augmented-transformers")
+    mlflow.set_experiment("Memory-augmented-transformer")
+    mlflow.start_run(run_name=run_name)
 
-    epochs = 2
-    learning_rate = 5e-4
-    warmup_steps = 1e2
-    epsilon = 1e-8
-    batch_size = 2
-    num_memories = 3
+    device = "cuda"
+    # Currently only have gpt2 coded up and only the distilled version fits well on my GPU
+    model_id = "distilgpt2"
+    epochs = epochs
+    learning_rate = lr
+    warmup_steps = warmup_steps
+    epsilon = epsilon
+    batch_size = batch_size
+    num_memories = num_memories
 
     mlflow.log_params({
         "epochs": epochs,
@@ -156,7 +103,7 @@ if __name__ == "__main__":
 
     train_dataloader = DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size = batch_size,
         shuffle=False  # Do not shuffle because we need to see the book in order
     )
 
@@ -193,6 +140,21 @@ if __name__ == "__main__":
                 knn_memories=knn_memories,
                 epoch=epoch
             )
+    mlflow.end_run()
+    mlflow.end_run()
 
+
+if __name__ == "__main__":
+    rand_state = 1
+    torch.manual_seed(rand_state)
+
+    if torch.cuda.is_available():
+        device = 'cuda'
+    else:
+        device = 'cpu'
+
+    run_experiment(
+        "test-run"
+    )
 
     
