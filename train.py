@@ -80,7 +80,7 @@ def run_experiment(
 
     all_texts = []
     for fname in os.listdir("./data/PG-19/sample/"):
-        if "train" in fname:
+        if "val" in fname:
             continue
         if not "txt" in fname:
             continue
@@ -94,7 +94,7 @@ def run_experiment(
     for fname in os.listdir("./data/PG-19/sample/"):
         if not "txt" in fname:
             continue
-        if "train" in fname:
+        if "val" in fname:
             with open(f"./data/PG-19/sample/{fname}", "r") as f:
                 valid_texts.append(f.read())
 
@@ -123,6 +123,13 @@ def run_experiment(
         model.parameters(),
         lr = learning_rate,
         eps = epsilon
+    )
+
+    run_validation(
+        model=model,
+        valid_dataloader=valid_dataloader,
+        knn_memories=None,
+        epoch=epoch
     )
 
     with memory_model.knn_memories_context(batch_size = train_dataloader.batch_size) as knn_memories:
