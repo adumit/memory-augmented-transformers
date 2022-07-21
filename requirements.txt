@@ -2,3 +2,7 @@ torch
 transformers
 mlflow
 memorizing_transformers_pytorch
+faiss-gpu 
+tqdm 
+numpy 
+datasets
