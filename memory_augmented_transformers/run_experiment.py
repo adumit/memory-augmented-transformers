@@ -25,23 +25,17 @@ def run_an_experiment(
     dataset_to_use="PG-19",
     finetune_body=False,
     finetune_head=False,
-    finetune_mems=True,
     unfreeze_head_after_n_epochs=100,
     unfreeze_knn_attns_after_n_epochs=100,
     learning_rate_part_2=None,
     head_mem_body_lrs=None,
     use_sigmoid_for_g=False,
-    use_feedforward_layer_per_knn_attn=False,
-    ff_mult=4,
-    ff_dropout=0.,
     apply_linear_g=True,
     mem_transformer_dim_head=64,
     mem_transformer_heads=12,
     apply_gated_xattn=False,
     use_tanh_for_g=False,
     use_pass_through_knns=False,
-    mem_aggregation_strategy="avg",
-    aggregate_after_ff=True,
     use_agg_before_layer=True,
     use_knn_mems_per_head=False,
     do_not_mem_grad_through_gpt_layers=False,
@@ -55,7 +49,9 @@ def run_an_experiment(
     rand_state = 1
     torch.manual_seed(rand_state)
 
-    mlflow.set_tracking_uri(f'https://dagshub.com/' + os.environ['MLFLOW_TRACKING_USERNAME'] + '/' + os.environ['MLFLOW_TRACKING_PROJECTNAME'] + '.mlflow')
+    # MLFlow will log to a local runs directory (./runs) if the environment variables aren't set for DagsHub
+    if "MLFLOW_TRACKING_USERNAME" in os.environ:
+        mlflow.set_tracking_uri(f'https://dagshub.com/' + os.environ['MLFLOW_TRACKING_USERNAME'] + '/' + os.environ['MLFLOW_TRACKING_PROJECTNAME'] + '.mlflow')
     mlflow.set_experiment("Memory-augmented-transformer-2022-06-07")
     mlflow.start_run(run_name=run_name)
     
@@ -82,20 +78,14 @@ def run_an_experiment(
         "finetune_head": finetune_head,
         "unfreeze_head_after_n_epochs": unfreeze_head_after_n_epochs,
         "learning_rate_part_2": learning_rate_part_2,
-        "finetune_mems": finetune_mems,
         "maximum_memories": maximum_memories,
         "use_sigmoid_for_g": use_sigmoid_for_g,
-        "use_feedforward_layer_per_knn_attn": use_feedforward_layer_per_knn_attn,
-        "ff_mult": ff_mult,
-        "ff_dropout": ff_dropout,
         "apply_linear_g": apply_linear_g,
         "dim_head": mem_transformer_dim_head,
         "heads": mem_transformer_heads,
         "apply_gated_xattn": apply_gated_xattn,
         "use_tanh_for_g": use_tanh_for_g,
         "use_pass_through_knns": use_pass_through_knns,
-        "mem_aggregation_strategy": mem_aggregation_strategy,
-        "aggregate_after_ff": aggregate_after_ff,
         "use_agg_before_layer": use_agg_before_layer,
         "use_knn_mems_per_head": use_knn_mems_per_head,
         "do_not_mem_grad_through_gpt_layers": do_not_mem_grad_through_gpt_layers,
