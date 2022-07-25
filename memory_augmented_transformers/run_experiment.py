@@ -22,21 +22,15 @@ def run_an_experiment(
     num_memories=3,
     maximum_memories=16384,
     layers_to_insert_memories=(3,),
-    dataset_to_use="PG-19",
+    dataset_to_use="worldbank_01",
     finetune_body=False,
     finetune_head=False,
-    unfreeze_head_after_n_epochs=100,
-    unfreeze_knn_attns_after_n_epochs=100,
-    learning_rate_part_2=None,
     head_mem_body_lrs=None,
     use_sigmoid_for_g=False,
     apply_linear_g=True,
-    mem_transformer_dim_head=64,
-    mem_transformer_heads=12,
-    apply_gated_xattn=False,
     use_tanh_for_g=False,
-    use_pass_through_knns=False,
-    use_agg_before_layer=True,
+    use_pass_through_knns=True,
+    use_agg_before_layer=False,
     use_knn_mems_per_head=False,
     do_not_mem_grad_through_gpt_layers=False,
     g_per_head=False,
@@ -76,14 +70,9 @@ def run_an_experiment(
         "layers_to_insert_memories": layers_to_insert_memories,
         "finetune_body": finetune_body,
         "finetune_head": finetune_head,
-        "unfreeze_head_after_n_epochs": unfreeze_head_after_n_epochs,
-        "learning_rate_part_2": learning_rate_part_2,
         "maximum_memories": maximum_memories,
         "use_sigmoid_for_g": use_sigmoid_for_g,
         "apply_linear_g": apply_linear_g,
-        "dim_head": mem_transformer_dim_head,
-        "heads": mem_transformer_heads,
-        "apply_gated_xattn": apply_gated_xattn,
         "use_tanh_for_g": use_tanh_for_g,
         "use_pass_through_knns": use_pass_through_knns,
         "use_agg_before_layer": use_agg_before_layer,
@@ -91,7 +80,6 @@ def run_an_experiment(
         "do_not_mem_grad_through_gpt_layers": do_not_mem_grad_through_gpt_layers,
         "g_per_head": g_per_head,
         "normalize_qk": normalize_qk,
-        "dataset": dataset_to_use
     }
     if head_mem_body_lrs:
       param_dict["learning_rate"] = head_mem_body_lrs
@@ -110,9 +98,6 @@ def run_an_experiment(
         max_mems=maximum_memories,
         use_sigmoid_for_g=use_sigmoid_for_g,
         apply_linear_g=apply_linear_g,
-        dim_head=mem_transformer_dim_head,
-        heads=mem_transformer_heads,
-        apply_gated_xattn=apply_gated_xattn,
         use_tanh_for_g=use_tanh_for_g,
         use_pass_through_knns=use_pass_through_knns,
         use_agg_before_layer=use_agg_before_layer,
@@ -185,30 +170,17 @@ def run_an_experiment(
     
     run_validation(
         model=model,
+        device=device,
         valid_dataloader=valid_dataloader,
         knn_memories=None,
         epoch=-1
     )
     
     with model.transformer.knn_memories_context(batch_size = train_dataloader.batch_size) as knn_memories:
-        for epoch in range(epochs):
-            if epoch + 1 > unfreeze_head_after_n_epochs:
-                model.unfreeze_head()
-                optimizer = AdamW(
-                    model.parameters(),
-                    lr = learning_rate_part_2,
-                    eps = epsilon
-                )
-            if epoch + 1 > unfreeze_knn_attns_after_n_epochs:
-                model.freeze_head()
-                optimizer = AdamW(
-                    model.parameters(),
-                    lr = learning_rate_part_2,
-                    eps = epsilon
-                )
-                
+        for epoch in range(epochs):  
             run_epoch(
                 model=model, 
+                device=device,
                 optimizer=optimizer, 
                 knn_memories=knn_memories, 
                 train_dataloader=train_dataloader, 
@@ -216,6 +188,7 @@ def run_an_experiment(
             )
             run_validation(
                 model=model,
+                device=device,
                 valid_dataloader=valid_dataloader,
                 knn_memories=knn_memories,
                 epoch=epoch

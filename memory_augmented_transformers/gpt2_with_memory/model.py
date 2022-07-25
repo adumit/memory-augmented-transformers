@@ -34,8 +34,6 @@ class GPT2WithMemory(nn.Module):
         allow_body_finetuning=False,
         use_sigmoid_for_g=False,
         apply_linear_g=True,
-        dim_head=64,
-        heads=12,
         use_tanh_for_g=False,
         use_pass_through_knns=False,
         use_agg_before_layer=True,
@@ -57,7 +55,6 @@ class GPT2WithMemory(nn.Module):
         self.use_agg_before_layer = use_agg_before_layer
         self.g_per_head = g_per_head
         self.normalize_qk = normalize_qk
-        self.dim_head = dim_head
         self.use_sigmoid_for_g = use_sigmoid_for_g
         self.use_tanh_for_g = use_tanh_for_g
         self.clear_memories_on_eos_token_id = clear_memories_on_eos_token_id
@@ -69,9 +66,8 @@ class GPT2WithMemory(nn.Module):
         }
         self.num_memory_layers = len(memory_layer_inds)
         self.apply_linear_g = apply_linear_g
-        mem_dim = dim_head if self.use_knn_mems_per_head else dim_head*heads
         self.knn_mem_kwargs = dict(
-            dim=mem_dim,
+            dim=self.model.config.n_embd if self.use_knn_mems_per_head else self.model.config.n_embd,
             max_memories=max_mems,
             multiprocessing=False
         )
@@ -84,18 +80,13 @@ class GPT2WithMemory(nn.Module):
         if self.use_pass_through_knns:
           self.knn_attns = [
               KNNAttentionNoNewLayer(
-                  dim_head=dim_head,
-                  heads=heads,
                   num_retrieved_memories=num_mems_retrieved,
-                  attn_scale_init=1,
                   do_not_grad_through_gpt_layers=do_not_mem_grad_through_gpt_layers,
                   normalize_qk=normalize_qk
               ).to(self.device) for _ in memory_layer_inds]
         elif self.use_agg_before_layer:
           self.knn_attns = [
               KNNAttentionAggBeforeMLP(
-                  dim_head=dim_head,
-                  heads=heads,
                   num_retrieved_memories=num_mems_retrieved,
                   apply_linear_g=apply_linear_g,
                   normalize_qk=normalize_qk
