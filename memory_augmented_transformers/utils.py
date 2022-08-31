@@ -7,19 +7,22 @@ from memory_augmented_transformers.gpt2_with_memory.model import GPT2WithMemory
 
 def get_gpt_memory_model_and_tokenizer(
     model_id,
-    device,
     mem_layer_inds, 
     num_mems, 
     max_mems,
     use_sigmoid_for_g,
     apply_linear_g,
+    device,
     use_tanh_for_g=False,
-    use_pass_through_knns=False,
-    use_agg_before_layer=True,
+    use_softmax_over_localdistant_layer=False,
     use_knn_mems_per_head=False,
-    do_not_mem_grad_through_gpt_layers=False,
     g_per_head=False,
-    normalize_qk=False
+    normalize_qk=False,
+    return_unreduced_loss=False,
+    normalize_query_for_attn_mult=False,
+    include_scale_parameter=False,
+    create_memory_gpt_layer_copy=False,
+    allow_body_finetuning=False
 ):
 
     base_model = GPT2LMHeadModel.from_pretrained(model_id).to(device)
@@ -29,18 +32,19 @@ def get_gpt_memory_model_and_tokenizer(
         base_model.transformer, 
         memory_layer_inds=mem_layer_inds, 
         num_mems_retrieved=num_mems, 
-        allow_body_finetuning=False,
+        allow_body_finetuning=allow_body_finetuning,
         clear_memories_on_eos_token_id=tokenizer.eos_token_id,
         max_mems=max_mems,
         use_sigmoid_for_g=use_sigmoid_for_g,
         apply_linear_g=apply_linear_g,
         use_tanh_for_g=use_tanh_for_g,
-        use_pass_through_knns=use_pass_through_knns,
-        use_agg_before_layer=use_agg_before_layer,
         use_knn_mems_per_head=use_knn_mems_per_head,
-        do_not_mem_grad_through_gpt_layers=do_not_mem_grad_through_gpt_layers,
         g_per_head=g_per_head,
-        normalize_qk=normalize_qk
+        normalize_qk=normalize_qk,
+        use_softmax_over_localdistant_layer=use_softmax_over_localdistant_layer,
+        normalize_query_for_attn_mult=normalize_query_for_attn_mult,
+        include_scale_parameter=include_scale_parameter,
+        create_memory_gpt_layer_copy=create_memory_gpt_layer_copy,
     )
 
     lm_head_model = GPT2LMHeadModel.from_pretrained(model_id)
@@ -48,7 +52,8 @@ def get_gpt_memory_model_and_tokenizer(
     model = GPT2LMHeadModelWithMemory(
         config=base_model.config,
         transformer_with_memory=memory_model,
-        lm_head_weight=lm_head_model.lm_head.weight
+        lm_head_weight=lm_head_model.lm_head.weight,
+        return_unreduced_loss=return_unreduced_loss
     )
     model = model.to(device)
     return model, tokenizer

@@ -1,19 +1,13 @@
 from typing import Optional, Tuple
 from contextlib import contextmanager
 from pathlib import Path
-from filelock import FileLock
+from copy import deepcopy
 
 import torch
 from torch import nn
 import transformers
-import mlflow
 
-from memorizing_transformers_pytorch.memorizing_transformers_pytorch import FeedForward
-
-from memory_augmented_transformers.layers.memory_attention import (
-    KNNAttentionAggBeforeMLP, 
-    KNNAttentionNoNewLayer
-)
+from memory_augmented_transformers.layers.memory_attention import KNNAttentionSoftmaxOverLocalAndDistant
 from memory_augmented_transformers.knn_memory.memories import KNNMemoryListCustPerHead, KNNMemoryListCust
 
 
@@ -35,12 +29,13 @@ class GPT2WithMemory(nn.Module):
         use_sigmoid_for_g=False,
         apply_linear_g=True,
         use_tanh_for_g=False,
-        use_pass_through_knns=False,
-        use_agg_before_layer=True,
+        use_softmax_over_localdistant_layer=False,
         use_knn_mems_per_head=False,
-        do_not_mem_grad_through_gpt_layers=False,
         g_per_head=False,
-        normalize_qk=False
+        normalize_qk=False,
+        normalize_query_for_attn_mult=False,
+        include_scale_parameter=False,
+        create_memory_gpt_layer_copy=False
     ):
         super().__init__()
         self.device = model.device
@@ -50,98 +45,116 @@ class GPT2WithMemory(nn.Module):
             for param in self.model.parameters():
                 param.requires_grad = False
 
+        heads = self.model.config.n_head
+        dim_head = int(self.model.config.n_embd / heads)
+        assert self.model.config.n_embd / heads == dim_head
+
         self.use_knn_mems_per_head = use_knn_mems_per_head
-        self.use_pass_through_knns = use_pass_through_knns
-        self.use_agg_before_layer = use_agg_before_layer
+        self.use_softmax_over_localdistant_layer = use_softmax_over_localdistant_layer
         self.g_per_head = g_per_head
         self.normalize_qk = normalize_qk
+        self.dim_head = dim_head
         self.use_sigmoid_for_g = use_sigmoid_for_g
         self.use_tanh_for_g = use_tanh_for_g
         self.clear_memories_on_eos_token_id = clear_memories_on_eos_token_id
         self.knn_memories_directory = knn_mem_dir
         self.memory_layer_inds = memory_layer_inds
+        self.normalize_query_for_attn_mult = normalize_query_for_attn_mult
+        self.include_scale_parameter = include_scale_parameter
+        self.create_memory_gpt_layer_copy = create_memory_gpt_layer_copy
         self.mem_layer_ind_to_attn_ind = {
             mem_layer_ind: attn_ind 
             for attn_ind, mem_layer_ind in enumerate(memory_layer_inds)
         }
+
         self.num_memory_layers = len(memory_layer_inds)
         self.apply_linear_g = apply_linear_g
+        mem_dim = dim_head if self.use_knn_mems_per_head else dim_head*heads
         self.knn_mem_kwargs = dict(
-            dim=self.model.config.n_embd if self.use_knn_mems_per_head else self.model.config.n_embd,
+            dim=mem_dim,
             max_memories=max_mems,
             multiprocessing=False
         )
         self.config = self.model.config
         self.dtype = self.model.dtype
 
-        if use_pass_through_knns and use_agg_before_layer:
-          raise RuntimeError("Cannot use pass through KNNs and AggAfter layer")
-
-        if self.use_pass_through_knns:
-          self.knn_attns = [
-              KNNAttentionNoNewLayer(
-                  num_retrieved_memories=num_mems_retrieved,
-                  do_not_grad_through_gpt_layers=do_not_mem_grad_through_gpt_layers,
-                  normalize_qk=normalize_qk
-              ).to(self.device) for _ in memory_layer_inds]
-        elif self.use_agg_before_layer:
-          self.knn_attns = [
-              KNNAttentionAggBeforeMLP(
-                  num_retrieved_memories=num_mems_retrieved,
-                  apply_linear_g=apply_linear_g,
-                  normalize_qk=normalize_qk
-              ).to(self.device) for _ in memory_layer_inds]
-        
-        if self.g_per_head:
-          self.gs = [torch.nn.Parameter(data=torch.zeros(self.model.config.n_head), requires_grad=True) 
-                    for _ in memory_layer_inds]
-          for i, g in enumerate(self.gs):
-            setattr(self, f"g-{i}", g)
+        if self.use_softmax_over_localdistant_layer:
+            assert self.g_per_head is True
+            self.knn_attns = [
+                KNNAttentionSoftmaxOverLocalAndDistant(
+                    dim_head=dim_head,
+                    heads=heads,
+                    num_retrieved_memories=num_mems_retrieved,
+                    apply_linear_g=apply_linear_g,
+                    normalize_qk=normalize_qk,
+                    normalize_query_for_attn_mult=normalize_query_for_attn_mult,
+                    include_scale_parameter=include_scale_parameter,
+                ).to(self.device) for _ in memory_layer_inds]
         else:
-          self.gs = [torch.nn.Parameter(data=torch.zeros(1), requires_grad=True) 
-                    for _ in memory_layer_inds]
-          for i, g in enumerate(self.gs):
-            setattr(self, f"g-{i}", g)
+            self.knn_attns = []
+
+        if self.create_memory_gpt_layer_copy:
+            self.memory_attention_layers = [
+                deepcopy(self.model.h[layer_ind])
+                for layer_ind in memory_layer_inds
+            ]
+            for i, mem_attn_layer in enumerate(self.memory_attention_layers):
+                setattr(self, f"mem_attn_layer-{i}", mem_attn_layer)
+          
+        if self.g_per_head:
+            self.gs = [torch.nn.Parameter(data=torch.zeros(self.model.config.n_head), requires_grad=True) 
+                       for _ in memory_layer_inds]
+            for i, g in enumerate(self.gs):
+                setattr(self, f"g-{i}", g)
+        else:
+            self.gs = [torch.nn.Parameter(data=torch.zeros(1), requires_grad=True) 
+                       for _ in memory_layer_inds]
+            for i, g in enumerate(self.gs):
+                setattr(self, f"g-{i}", g)
 
         for i, knn_attn in enumerate(self.knn_attns):
             setattr(self, f"knn_attn-{i}", knn_attn)
 
     def freeze_body(self):
-      for param in self.model.parameters():
-        param.requires_grad = False
+        for param in self.model.parameters():
+            param.requires_grad = False
     
     def unfreeze_body(self):
-      for param in self.model.parameters():
-        param.requires_grad = True
+        for param in self.model.parameters():
+            param.requires_grad = True
 
     def get_body_parameters(self):
-      return self.model.parameters()
+        return self.model.parameters()
 
     def get_knn_parameters(self):
-      for knn_attn in self.knn_attns:
-        for param in knn_attn.parameters():
-          yield param
-      for g in self.gs:
-        yield g
+        for knn_attn in self.knn_attns:
+            for param in knn_attn.parameters():
+                yield param
+        for g in self.gs:
+            yield g
+        if hasattr(self, "memory_attention_layers"):
+            for mem_attn_layer in self.memory_attention_layers:
+                for param in mem_attn_layer.parameters():
+                    yield param
         
     def create_knn_memories(
         self,
         *,
         batch_size
     ):
-      if self.use_knn_mems_per_head:
-        return KNNMemoryListCustPerHead.create_memories(
-            batch_size = batch_size,
-            num_memory_layers = self.num_memory_layers,
-            memories_directory = self.knn_memories_directory,
-            num_heads=self.model.config.n_head
-        )(**self.knn_mem_kwargs)
-      else:
-        return KNNMemoryListCust.create_memories(
-            batch_size = batch_size,
-            num_memory_layers = self.num_memory_layers,
-            memories_directory = self.knn_memories_directory,
-        )(**self.knn_mem_kwargs)
+        if self.use_knn_mems_per_head:
+            return KNNMemoryListCustPerHead.create_memories(
+                batch_size = batch_size,
+                num_memory_layers = self.num_memory_layers,
+                memories_directory = self.knn_memories_directory,
+                num_heads=self.model.config.n_head
+            )(**self.knn_mem_kwargs)
+        else:
+            return KNNMemoryListCust.create_memories(
+                batch_size = batch_size,
+                num_memory_layers = self.num_memory_layers,
+                memories_directory = self.knn_memories_directory,
+            )(**self.knn_mem_kwargs)
 
     @contextmanager
     def knn_memories_context(
@@ -156,10 +169,10 @@ class GPT2WithMemory(nn.Module):
             knn_memories = self.create_knn_memories(**kwargs)
             yield knn_memories
             if self.use_knn_mems_per_head:
-              for i in range(len(self.gs)):
-                knn_memories[i].cleanup()
+                for i in range(len(self.gs)):
+                    knn_memories[i].cleanup()
             else:
-              knn_memories.cleanup()
+                knn_memories.cleanup()
             
     def clear_memory(self, x, token_id, knn_memories, step=None):
         """ clears the KNN memories based on if the batch row contains the specified token id """
@@ -169,17 +182,11 @@ class GPT2WithMemory(nn.Module):
         batch_indices, *_ = clear_memory.nonzero(as_tuple = True)
         batch_indices_to_clear = batch_indices.tolist()
 
-        if len(batch_indices_to_clear) == 0:
-          mlflow.log_metric("memory_cleared", 0, step=step)
-          return
-        else:
-          mlflow.log_metric("memory_cleared", 1, step=step)
-
         if self.use_knn_mems_per_head:
-          for i in range(len(self.gs)):
-            knn_memories[i].clear_memory(batch_indices_to_clear)
+            for i in range(len(self.gs)):
+                knn_memories[i].clear_memory(batch_indices_to_clear)
         else:
-          knn_memories.clear_memory(batch_indices_to_clear)
+            knn_memories.clear_memory(batch_indices_to_clear)
 
     def forward(
         self,
@@ -289,34 +296,40 @@ class GPT2WithMemory(nn.Module):
         all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
         all_hidden_states = () if output_hidden_states else None
         prev_hidden = None
-        prev_block = None
         for i, (block, layer_past) in enumerate(zip(self.model.h, past_key_values)):
 
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
             prev_hidden = hidden_states.clone()
 
-            if self.use_agg_before_layer:
-              if i in self.memory_layer_inds and knn_memories is not None:
+            if i in self.memory_layer_inds and knn_memories is not None:
                 ind_to_get = self.mem_layer_ind_to_attn_ind[i]
+                if step is not None and (step+1) % 100 == 0:
+                    # Ensure that we're actually getting some signal from our memory
+                    # I added this in because I was observing errors with the parallel
+                    # processing where it appeared the delayed functions weren't 
+                    # getting called
+                    assert any(any(knn.is_trained for knn in knn_mem.knns) for knn_mem in knn_memories[ind_to_get])
+
                 g_val = self.gs[ind_to_get]
                 if self.use_sigmoid_for_g:
-                  g_val = torch.nn.functional.sigmoid(g_val)
+                    g_val = torch.nn.functional.sigmoid(g_val)
                 elif self.use_tanh_for_g:
-                  g_val = torch.tanh(g_val)
+                    g_val = torch.tanh(g_val)
 
                 knn_layer = self.knn_attns[ind_to_get]
                 hidden_states = knn_layer(
                     previous_hidden=prev_hidden,
-                    cur_layer=block,
+                    mem_layer=self.memory_attention_layers[ind_to_get] if hasattr(self, 'memory_attention_layers') else block,
                     attention_mask=attention_mask,
                     head_mask=head_mask[i],
                     knn_memory=knn_memories[ind_to_get],
                     step=step,
                     g_val=g_val,
-                    memory_per_head=self.use_knn_mems_per_head
+                    memory_per_head=self.use_knn_mems_per_head,
+                    standard_layer=block if hasattr(self, 'memory_attention_layers') else None
                 )
-              else:
+            else:
                 outputs = block(
                     hidden_states,
                     layer_past=layer_past,
@@ -328,58 +341,6 @@ class GPT2WithMemory(nn.Module):
                     output_attentions=output_attentions,
                 )
                 hidden_states = outputs[0]
-            else:
-              outputs = block(
-                  hidden_states,
-                  layer_past=layer_past,
-                  attention_mask=attention_mask,
-                  head_mask=head_mask[i],
-                  encoder_hidden_states=encoder_hidden_states,
-                  encoder_attention_mask=encoder_attention_mask,
-                  use_cache=use_cache,
-                  output_attentions=output_attentions,
-              )
-              hidden_states = outputs[0]
-
-              if i in self.memory_layer_inds and knn_memories is not None:
-                ind_to_get = self.mem_layer_ind_to_attn_ind[i]
-                if self.use_pass_through_knns:
-                  hidden_states_from_knn = self.knn_attns[ind_to_get](
-                      previous_hidden=prev_hidden,
-                      cur_layer=block,
-                      attention_mask=attention_mask,
-                      head_mask=head_mask[i],
-                      knn_memory=knn_memories[ind_to_get],
-                      step=step,
-                      memory_per_head=self.use_knn_mems_per_head
-                  )
-
-                g_val = self.gs[ind_to_get]
-                if self.use_sigmoid_for_g:
-                  g_val = torch.nn.functional.sigmoid(g_val)
-                elif self.use_tanh_for_g:
-                  g_val = torch.tanh(g_val)
-
-                if self.g_per_head:
-                  g_val = g_val.view(1, -1, 1, 1)
-                  hidden_states = block.attn._split_heads(hidden_states, self.model.config.n_head, self.dim_head)
-                  hidden_states_from_knn = block.attn._split_heads(hidden_states_from_knn, self.model.config.n_head, self.dim_head)
-
-                if self.apply_linear_g:
-                  hidden_states = g_val * hidden_states_from_knn + (1. - g_val) * hidden_states
-                else:
-                  hidden_states = g_val * hidden_states_from_knn + hidden_states
-                
-                if self.g_per_head:
-                  hidden_states = block.attn._merge_heads(hidden_states, self.model.config.n_head, self.dim_head)
-
-              if use_cache is True:
-                  presents = presents + (outputs[1],)
-
-              if output_attentions:
-                  all_self_attentions = all_self_attentions + (outputs[2 if use_cache else 1],)
-                  if self.config.add_cross_attention:
-                      all_cross_attentions = all_cross_attentions + (outputs[3 if use_cache else 2],)
 
         hidden_states = self.model.ln_f(hidden_states)
 
